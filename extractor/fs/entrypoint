@@ -1,0 +1,21 @@
+#!/usr/bin/env sh
+
+self_dir="$(dirname "$(readlink -f "$0")")"
+source "$self_dir/bin/common/common"
+
+function list_array_items() {
+    local src="$1"
+    local from_idx="${2:-0}"
+
+    local i; for i in $(eval "local ia=(\${!$src[@]}); echo \${ia[@]:$from_idx}"); do
+        echo -n "\"$(eval "echo \${$src[$i]}")\" "
+    done
+}
+
+declare -a entrypoint=(@@entrypoint@@)
+declare -a command=(@@command@@); if [[ $# -gt 0 ]]; then command=("$@"); fi
+declare -a args=("${entrypoint[@]}" "${command[@]}")
+
+target_exec="exec $self_dir/bin/interpreter 'shebang_exec ${args[0]}' $(list_array_items "args" 1)"
+
+eval "$target_exec"
