@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+set -eEuo pipefail
+shopt -s inherit_errexit
+trap "log ERROR: command failed" ERR
+
+function log() {
+    echo -e "$@" 1>&2
+}
+function stripnl() {
+    echo -n "$1"
+}
+
+source_image_name="$1"
+target_dir="$(realpath "$2")"
+
+self_dir="$(dirname "$(readlink -e "$0")")"
+
+fs_root_dir="$target_dir/fs_root"
+cfg_dir="$target_dir/cfg"
+
+function relocate_fs() {
+    local fs_root="$1"
+
+    ( cd "$fs_root" && for file in $(find -type f,l); do
+        if [[ -L "$file" ]]; then # symlink absolute path
+            local target; target=$(readlink "$file")
+
+            log "procsessing link $file -> $target"
+            if [[ "$target" == /* ]]; then
+                local rel_target; rel_target="$(realpath -s --relative-to "$(dirname "$file")" "./$(dirname "$target")")/$(basename "$target")"
+                log "\trelocating to $rel_target"
+                rm "$file" && ln -s "$rel_target" "$file"
+            fi
+        elif [[ -x "$file" ]]; then #   executable interpreter
+            log "processing executable $file"
+            case "$(IFS=';' read -r t _ <<< "$(file -ib "$file")"; echo $t)" in
+                text/*)
+                    local file_text=$(cat "$file")
+
+                    local skip_head
+                    local shebang; shebang="$(head -n1 <<< "$file_text")"
+                    if [[ "$shebang" = \#\!* ]]; then
+                        shebang="${shebang#\#\!}"
+                        skip_head="true"
+                    else
+                        shebang="/bin/sh"
+                        skip_head="false"
+                    fi
+
+                    log "\tscript shebang $shebang"
+                    {
+                        echo "#!intp shebang_exec $shebang"
+                        tail -n+$([[ "$skip_head" == true ]] && echo 2 || echo 1) <<< "$file_text"
+                    } > "$file"
+                    echo "$file" >> "$cfg_dir/relocatable_scripts"
+                ;;
+                application/x*-executable)
+                    local bin_interpreter=$(patchelf --print-interpreter "$file" 2>/dev/null)
+
+                    local file_dir="$(dirname "$file")"
+                    local relocated_file_name="$(basename "$file")"
+                    while [[ -e "$file_dir/$relocated_file_name" ]]; do
+                        relocated_file_name="${relocated_file_name}_"
+                    done
+                    log "\trelocating to $relocated_file_name"
+                    mv "$file" "$file_dir/$relocated_file_name"
+                    if [[ "$bin_interpreter" =~ ' ' ]] || [[ "$relocated_file_name" =~ ' ' ]]; then
+                        log "ERROR: unable to process file with a space: $bin_interpreter or $relocated_file_name"
+                        exit 1
+                    fi
+                    { if [[ -n "$bin_interpreter" ]]; then
+                        echo -e "#!intp ld_exec $bin_interpreter $relocated_file_name"
+                    else
+                        echo -e "#!intp static_exec $relocated_file_name"
+                    fi ; } > "$file" && chmod +x "$file"
+                    echo "$file" >> "$cfg_dir/relocatable_scripts"
+
+                ;;
+                application/x-sharedlib|inode/x-empty) ;; # no need to relocate
+                *) log "\tunknown executable type"; exit 1; ;;
+            esac
+        fi
+    done )
+}
+
+### 
+
+rm -rf "$target_dir" && mkdir "$target_dir" "$fs_root_dir" "$cfg_dir"
+
+log "loading docker image $source_image_name"
+
+fs_container=$(mktemp -utp /)
+trap 'docker container rm "$fs_container" > /dev/null' EXIT
+docker create --name "$fs_container" "$source_image_name" >/dev/null
+docker export "$fs_container" | tar -C "$fs_root_dir" -x
+chmod -R +w "$fs_root_dir"
+
+relocate_fs "$fs_root_dir"
+
+source_container_meta=$(docker inspect "$fs_container" | jq -r '.[0]')
+
+env_vars="$(jq '.Config.Env[]' <<< "$source_container_meta")"
+echo "env_vars = $env_vars"
+
+workingdir=$(jq -r '.Config.WorkingDir' <<< "$source_container_meta")
+echo "workingdir = $workingdir"
+
+entrypoint=$(stripnl "$(jq '.Config.Entrypoint // [] | .[]' <<< "$source_container_meta")")
+command=$(stripnl "$(jq '.Config.Cmd // [] | .[]' <<< "$source_container_meta")")
+echo "entrypoint = ${entrypoint//$'\n'/ }"
+echo "command = ${command//$'\n'/ }"
+
+cp -r "$self_dir/fs/." "$target_dir"
+
+for line in $env_vars; do
+    printf "%s\0" "$(jq -r <<< "$line")" >> "$cfg_dir/env_vars"
+done
+
+function jq_to_sh() {
+    local input="$1"
+    for l in $input; do
+        printf "%q\n" "$(jq -r <<< "$l")"
+    done
+}
+
+tmp=$(mktemp)
+awk \
+    -v entrypoint="$(jq_to_sh "$entrypoint")" \
+    -v command="$(jq_to_sh "$command")" \
+    '{gsub(/@@entrypoint@@/,entrypoint)} {gsub(/@@command@@/,command)} 1' \
+    "$target_dir/entrypoint" > "$tmp" && cat "$tmp" > "$target_dir/entrypoint" && rm "$tmp"
