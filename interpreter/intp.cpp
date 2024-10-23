@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cctype>
 #include <locale>
+#include <vector>
 
 using namespace std;
 
@@ -142,7 +143,7 @@ static string replace_all(const string_view &source, const string_view &from, co
         target.append(source, left, right - left);
         if (right < source.length()) {
             target.append(to);
-            right += to.length();
+            right += from.length();
         }
         left = right;
     }
@@ -170,7 +171,7 @@ static void prepare_environment(filesystem::path &root, filesystem::path &fs_roo
                     string path_element; while (getline(path_stream, path_element, ':')) {
                         ((new_path += ":") += fs_root) += path_element;
                     }
-                    new_path;
+                    new_path + ":" + getenv("PATH");
                 });
             }
 
@@ -178,7 +179,6 @@ static void prepare_environment(filesystem::path &root, filesystem::path &fs_roo
         }
     }
 
-    setenv("LD_LIBRARY_PATH", ((fs_root / "lib").string() + ":" + (fs_root / "usr/lib").string()).c_str(), true); // todo need to specify library path dynamically
     setenv(DECONTAINERIZR_FS_ROOT, fs_root.c_str(), true);
 }
 
@@ -232,10 +232,10 @@ int main(const int argc, char *const argv[]) {
         auto args = parse_exec_request(pfx, sizeof pfx, exec_request);
 
         target_exe = resolve_target(get<0>(args), fs_root, getenv("PATH"));
+        exec_args.push_back(to_heap(target_exe));
         if (!get<1>(args).empty()) {
             exec_args.push_back((new string(get<1>(args)))->data());
         }
-        exec_args.push_back(argv[2]);
         exec_args.push_back(argv[2]);
     } else if (char pfx[] = "ld_exec "; exec_request.rfind(pfx, 0) == 0) { // ld_exec <ld> <rel_path>
         auto args = parse_exec_request(pfx, sizeof pfx, exec_request);
@@ -245,6 +245,7 @@ int main(const int argc, char *const argv[]) {
         auto absolute_target = resolve_target((string) argv[2], fs_root, getenv("PATH"));
         exec_args.push_back(to_heap(target_exe));
         exec_args.push_back(to_heap("--argv0")); exec_args.push_back(to_heap(absolute_target));
+        exec_args.push_back(to_heap("--library-path")); exec_args.push_back(getenv("DECONTAINERIZR_LD_LIBRARY_PATH"));
 
         exec_args.push_back(to_heap(filesystem::canonical(absolute_target).parent_path() / get<1>(args)));
     } else if (exec_request.rfind("static_exec ", 0) == 0) { // direct_exec <rel_path>

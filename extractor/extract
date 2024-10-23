@@ -113,14 +113,14 @@ echo "command = ${command//$'\n'/ }"
 
 cp -r "$self_dir/fs/." "$target_dir"
 
-for line in $env_vars; do
-    printf "%s\0" "$(jq -r <<< "$line")" >> "$cfg_dir/env_vars"
-done
+while read -r line;  do
+    printf "%s\0" "$(jq -r . <<< "$line")" >> "$cfg_dir/env_vars"
+done <<< "$env_vars"
 
 function jq_to_sh() {
     local input="$1"
     for l in $input; do
-        printf "%q\n" "$(jq -r <<< "$l")"
+        printf "%q\n" "$(jq -r . <<< "$l")"
     done
 }
 
